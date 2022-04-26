@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+
+from re import T
+import warnings
+from fasta_reader import read_fasta
+import numpy as np
+from pydivsufsort import divsufsort, kasai
+from time import time
+import argparse
+import pickle
+import sys
+
+# Parse arguments
+parser = argparse.ArgumentParser()
+parser.add_argument('index')
+parser.add_argument('queries')
+parser.add_argument('query_mode')
+parser.add_argument('output')
+args = parser.parse_args()
+
+index = args.index
+queries = read_fasta(args.queries)
+mode = args.query_mode
+out = args.output
+
+# Read suffix array from index file
+file = open(index, "rb")
+k = int.from_bytes(file.read(4), 'big')
+s_len = int.from_bytes(file.read(4), 'big')
+input_string = file.read(s_len).decode()
+sa_len = int.from_bytes(file.read(4), 'big')
+sa = np.fromfile(file, np.int32, sa_len)
+preftable = pickle.load(file)
+file.close()
+
+output_lines = []
+
+# Keeping track of total time for queries
+total_time = 0
+
+ct = 0
+# Go through queries
+for query in queries:
+    print(ct)
+    # Start timer
+    t = time()
+
+    name = query.defline
+    query_string = query.sequence
+    hits = []
+    num_occurrences = 0
+    start = 0
+    end = len(sa)
+
+    # Query is in our table, we know which suffixes it is for
+    if len(preftable) != 0 and len(query_string) == k and query_string in preftable:
+        start = preftable[query_string][0]
+        end = preftable[query_string][1]
+    else:
+        if len(preftable) != 0 and len(query_string) > k:
+            pref = ""
+            for i in range(k):
+                pref += query_string[i]
+            if pref in preftable:
+                start = preftable[pref][0]
+                end = preftable[pref][1]
+
+
+        # 2 binary searches one for start one for end
+        for i in range(2):
+
+            # If start == end we've reached the end (edge case)
+            if start == end:
+                break
+            
+            q = query_string
+
+            # If second iteration, increment last character
+            if i == 1:
+                last_char = chr(ord(q[len(q) - 1]) + 1)
+                q = q[:-1] + last_char
+
+            l = start if i == 1 else 0
+            r = len(sa)
+
+            # In case we do simpaccel
+            lcp_l = lcp_r = 0
+
+            while 1:
+                c = int((l + r)/2)
+                less = True
+
+                # Use LCP if doing simpaccel
+                j = 0 if mode == "naive" else min(lcp_l, lcp_r)
+
+                # Check if query is less than c by going letter by letter
+                while j < len(q) and j < len(input_string) - sa[c]:
+                    if q[j] < input_string[sa[c] + j]:
+                        break
+                    elif q[j] > input_string[sa[c] + j]:
+                        less = False
+                        break
+                    j += 1
+
+                if less:
+                    if c == l + 1:
+                        if i == 0:
+                            start = c
+                        else:
+                            end = c
+                        break
+                    else:
+                        r = c
+                        if mode == "simpaccel":
+                            lcp_r = i
+                else:
+                    if c == r - 1:
+                        if i == 0:
+                            start = r
+                        else:
+                            end = r
+                        break
+                    else:
+                        l = c
+                        if mode == "simpaccel":
+                            lcp_l = i
+    
+    # Check to make sure range specifies the prefix (edge case when query lexicographically first)
+    if start != len(input_string):
+        for i in range(len(input_string) - sa[start]):
+            if i >= len(query_string):
+                break
+            elif i >= len(query_string) or query_string[i] != input_string[sa[start] + i]:
+                end = start
+                break
+
+    num_occurrences = end - start
+    for i in range(start, end):
+        hits.append(sa[i])
+
+    # Update time only after each query
+    curr_time = time() - t
+    total_time += curr_time
+
+
+    with open("statistics/query_stats.txt", "a") as f:
+        f.write(str(len(input_string)) + "," + str(k) + "," + str(curr_time) + "," + name + "," + mode +"\n")
+
+    line = name + "\t" + str(num_occurrences)
+    for hit in hits:
+        line += "\t" + str(hit)
+    line += "\n"
+
+    with open(out, "a") as file:
+        file.write(line)
+    ct += 1
+
+print("Time for queries: " + str(total_time))
+
+
+
+

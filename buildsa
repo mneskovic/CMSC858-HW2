@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+
+import os
+import warnings
+from fasta_reader import read_fasta
+import numpy as np
+from pydivsufsort import divsufsort, kasai
+from time import time
+import argparse
+import pickle
+import sys
+
+# Parse arguments
+parser = argparse.ArgumentParser()
+parser.add_argument('reference')
+parser.add_argument('output')
+parser.add_argument('--preftab')
+args = parser.parse_args()
+
+ref = args.reference
+out = args.output
+k = args.preftab
+
+# Reads file and gets input string
+for item in read_fasta(ref):
+  input_string = item.sequence
+  input_string += "$"
+
+# Time building of suffix array
+t = time()
+
+# Uses divsufsort library to create suffix array as NumPy array
+with warnings.catch_warnings():
+  warnings.simplefilter("ignore")
+  sa = divsufsort(input_string)
+
+# Build preftable
+preftable = {}
+
+if k != None:
+  k = int(k)
+  oldpref = ""
+
+  # When prefix of length k changes, new interval starts
+  for i in range(1, len(sa)):
+    if len(input_string) - sa[i] <= k:
+      continue
+
+    pref = ""
+    for j in range(k):
+      pref += input_string[sa[i] + j]
+    if pref not in preftable:
+      preftable[pref] = np.array([i])
+      if oldpref != "":
+        preftable[oldpref] = np.append(preftable[oldpref], i)
+      oldpref = pref
+
+  preftable[oldpref] = np.append(preftable[oldpref], len(sa))
+else:
+  k = 0
+# Prints creation time
+time_build = time() - t
+
+# Save everything to output file
+file = open(out, "wb")
+file.write(k.to_bytes(4, 'big'))
+file.write(len(input_string).to_bytes(4, 'big'))
+file.write(input_string.encode())
+file.write(len(sa).to_bytes(4, 'big'))
+sa.tofile(file)
+pickle.dump(preftable, file)
+file.close()
+
+# Prints size of file
+size_file = os.path.getsize(out)
+size_in = os.path.getsize(ref)
+
+with open("statistics/build_stats.txt", "a") as f:
+  f.write(str(size_in) + "," + str(k) + "," + str(time_build) + "," + str(size_file) +"\n")
